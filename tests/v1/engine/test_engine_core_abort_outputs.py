@@ -24,6 +24,7 @@ EngineCoreRequest = v1_engine.EngineCoreRequest
 FinishReason = v1_engine.FinishReason
 EngineCoreProc = engine_core.EngineCoreProc
 OutputProcessor = output_processor_module.OutputProcessor
+SpanAttributes = output_processor_module.SpanAttributes
 IterationStats = stats_module.IterationStats
 Request = request_module.Request
 RequestStatus = request_module.RequestStatus
@@ -262,3 +263,105 @@ def test_generate_abort_output_propagates_to_request_output_stats_and_tracing(
             "finished_requests": 1,
         }
     ]
+
+
+def test_queued_abort_output_normalizes_unscheduled_stats_and_tracing(monkeypatch):
+    output_processor = OutputProcessor(
+        tokenizer=None,
+        log_stats=True,
+        tracing_enabled=True,
+    )
+
+    engine_request = EngineCoreRequest(
+        request_id="queued-request",
+        external_req_id="queued-request-ext",
+        prompt_token_ids=list(range(5)),
+        mm_features=None,
+        sampling_params=SamplingParams(max_tokens=8),
+        pooling_params=None,
+        arrival_time=time.time() - 1.0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        trace_headers={"traceparent": "queued-trace"},
+    )
+    output_processor.add_request(engine_request, prompt=None)
+
+    trace_attributes = []
+
+    def instrument_spy(
+        span_name,
+        start_time,
+        end_time=None,
+        attributes=None,
+        context=None,
+        kind=None,
+    ):
+        trace_attributes.append(attributes)
+
+    monkeypatch.setattr(output_processor_module, "instrument_manual", instrument_spy)
+
+    request = Request(
+        request_id=engine_request.request_id,
+        prompt_token_ids=engine_request.prompt_token_ids,
+        sampling_params=engine_request.sampling_params,
+        pooling_params=None,
+        client_index=0,
+        arrival_time=engine_request.arrival_time,
+        trace_headers=engine_request.trace_headers,
+    )
+    request.status = RequestStatus.FINISHED_ABORTED
+    request.record_event(EngineCoreEventType.QUEUED, timestamp=1.0)
+
+    abort_output = EngineCoreProc._make_abort_output(request)
+    assert abort_output.num_cached_tokens == 0
+    assert abort_output.num_external_computed_tokens == 0
+
+    iteration_stats = IterationStats()
+    processed_outputs = output_processor.process_outputs(
+        [abort_output],
+        engine_core_timestamp=time.monotonic(),
+        iteration_stats=iteration_stats,
+    )
+
+    assert processed_outputs.reqs_to_abort == []
+    assert len(processed_outputs.request_outputs) == 1
+
+    request_output = processed_outputs.request_outputs[0]
+    assert request_output.request_id == engine_request.external_req_id
+    assert request_output.finished
+    assert request_output.num_cached_tokens == 0
+    assert request_output.outputs[0].finish_reason == "abort"
+    assert request_output.outputs[0].token_ids == []
+
+    assert iteration_stats.prompt_token_stats.total == 0
+    assert iteration_stats.prompt_token_stats.computed == 0
+    assert iteration_stats.prompt_token_stats.cached_tokens == 0
+    assert iteration_stats.prompt_token_stats.external_kv_transfer == 0
+    assert iteration_stats.time_to_first_tokens_iter == []
+
+    assert len(iteration_stats.finished_requests) == 1
+    finished_request = iteration_stats.finished_requests[0]
+    assert finished_request.finish_reason == FinishReason.ABORT
+    assert finished_request.num_cached_tokens == 0
+    assert finished_request.queued_time == 0
+    assert finished_request.prefill_time == 0
+    assert finished_request.decode_time == 0
+    assert finished_request.inference_time == 0
+
+    assert len(trace_attributes) == 1
+    trace_attrs = trace_attributes[0]
+    assert trace_attrs is not None
+    assert trace_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_TO_FIRST_TOKEN] == 0.0
+    assert (
+        trace_attrs[SpanAttributes.GEN_AI_LATENCY_E2E] == finished_request.e2e_latency
+    )
+    assert trace_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_QUEUE] == 0.0
+    assert trace_attrs[SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS] == 5
+    assert trace_attrs[SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS] == 0
+    assert trace_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_PREFILL] == 0.0
+    assert trace_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_DECODE] == 0.0
+    assert trace_attrs[SpanAttributes.GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE] == 0.0
+    assert (
+        trace_attrs[SpanAttributes.GEN_AI_REQUEST_ID] == engine_request.external_req_id
+    )

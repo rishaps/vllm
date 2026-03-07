@@ -716,10 +716,9 @@ class OutputProcessor:
 
         # Calculate timing metrics
         e2e_time = iteration_stats.iteration_timestamp - metrics.arrival_time
-        queued_time = metrics.scheduled_ts - metrics.queued_ts
-        prefill_time = metrics.first_token_ts - metrics.scheduled_ts
-        decode_time = metrics.last_token_ts - metrics.first_token_ts
-        inference_time = metrics.last_token_ts - metrics.scheduled_ts
+        queued_time, prefill_time, decode_time, inference_time = (
+            metrics.get_timing_intervals()
+        )
 
         # Build attributes dict
         attributes: dict[str, Any] = {

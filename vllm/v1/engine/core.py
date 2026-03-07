@@ -1486,6 +1486,12 @@ class EngineCoreProc(EngineCore):
 
     @staticmethod
     def _make_abort_output(request: Request) -> EngineCoreOutput:
+        num_cached_tokens = max(request.num_cached_tokens, 0)
+        num_external_computed_tokens = (
+            request.num_external_computed_tokens
+            if request.num_cached_tokens >= 0
+            else 0
+        )
         return EngineCoreOutput(
             request_id=request.request_id,
             new_token_ids=[],
@@ -1496,8 +1502,8 @@ class EngineCoreProc(EngineCore):
             stop_reason=request.stop_reason,
             events=request.take_events(),
             trace_headers=request.trace_headers,
-            num_cached_tokens=request.num_cached_tokens,
-            num_external_computed_tokens=request.num_external_computed_tokens,
+            num_cached_tokens=num_cached_tokens,
+            num_external_computed_tokens=num_external_computed_tokens,
             num_nans_in_logits=request.num_nans_in_logits,
         )
 
@@ -1621,8 +1627,12 @@ class DPEngineCoreProc(EngineCoreProc):
         counts = self.scheduler.get_request_counts()
         if counts != self.last_counts:
             self.last_counts = counts
+            num_running_reqs, num_waiting_reqs = counts
             stats = SchedulerStats(
-                *counts, step_counter=self.step_counter, current_wave=self.current_wave
+                num_running_reqs=num_running_reqs,
+                num_waiting_reqs=num_waiting_reqs,
+                step_counter=self.step_counter,
+                current_wave=self.current_wave,
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
