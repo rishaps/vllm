@@ -1627,10 +1627,8 @@ class DPEngineCoreProc(EngineCoreProc):
         counts = self.scheduler.get_request_counts()
         if counts != self.last_counts:
             self.last_counts = counts
-            num_running_reqs, num_waiting_reqs = counts
             stats = SchedulerStats(
-                num_running_reqs=num_running_reqs,
-                num_waiting_reqs=num_waiting_reqs,
+                *counts,
                 step_counter=self.step_counter,
                 current_wave=self.current_wave,
             )
