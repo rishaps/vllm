@@ -27,6 +27,7 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.utils.torch_utils import set_default_torch_num_threads
+from vllm.v1.engine import FinishReason
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.loggers import (
     AggregatedLoggingStatLogger,
@@ -41,6 +42,13 @@ if not current_platform.is_cuda():
 TEXT_ENGINE_ARGS = AsyncEngineArgs(
     model="meta-llama/Llama-3.2-1B-Instruct",
     enforce_eager=True,
+)
+
+PREFIX_CACHE_TEXT_ENGINE_ARGS = AsyncEngineArgs(
+    model="facebook/opt-125m",
+    enforce_eager=True,
+    enable_prefix_caching=True,
+    block_size=16,
 )
 
 VISION_ENGINE_ARGS = AsyncEngineArgs(
@@ -804,6 +812,109 @@ async def test_pause_abort():
         final_output2 = await asyncio.wait_for(gen_task2, timeout=10.0)
         assert request_completed
         assert final_output2.finished
+
+
+@pytest.mark.asyncio
+async def test_pause_abort_preserves_output_stats_and_tracing_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with ExitStack() as after:
+        with set_default_torch_num_threads(1):
+            engine = AsyncLLM.from_engine_args(PREFIX_CACHE_TEXT_ENGINE_ARGS)
+        after.callback(engine.shutdown)
+
+        cacheable_prompt = {"prompt_token_ids": [101] * 17}
+
+        # Warm prefix cache so the aborted request has non-zero cached tokens.
+        async for _ in engine.generate(
+            request_id="prefix-cache-warmup",
+            prompt=cacheable_prompt,
+            sampling_params=SamplingParams(max_tokens=1),
+        ):
+            pass
+
+        output_processor = engine.output_processor
+        output_processor.tracing_enabled = True
+
+        stats_calls: list[dict[str, int | str | None]] = []
+        trace_calls: list[dict[str, object]] = []
+
+        original_update_stats = output_processor._update_stats_from_finished
+
+        def stats_spy(req_state, finish_reason, iteration_stats):
+            stats_calls.append(
+                {
+                    "finish_reason": finish_reason,
+                    "num_cached_tokens": req_state.num_cached_tokens,
+                }
+            )
+            return original_update_stats(req_state, finish_reason, iteration_stats)
+
+        def trace_spy(engine_core_output, req_state, iteration_stats):
+            trace_calls.append(
+                {
+                    "trace_headers": engine_core_output.trace_headers,
+                    "num_cached_tokens": req_state.num_cached_tokens,
+                }
+            )
+
+        monkeypatch.setattr(output_processor, "_update_stats_from_finished", stats_spy)
+        monkeypatch.setattr(output_processor, "do_tracing", trace_spy)
+
+        trace_headers = {"traceparent": "pause-abort-trace"}
+        sampling_params = SamplingParams(
+            max_tokens=1000,
+            ignore_eos=True,
+            output_kind=RequestOutputKind.DELTA,
+            temperature=0.5,
+            seed=42,
+        )
+
+        outputs: list[RequestOutput] = []
+
+        async def gen():
+            async for out in engine.generate(
+                request_id="pause-abort-cached",
+                prompt=cacheable_prompt,
+                sampling_params=sampling_params,
+                trace_headers=trace_headers,
+            ):
+                outputs.append(out)
+            return outputs[-1] if outputs else None
+
+        gen_task = asyncio.create_task(gen())
+
+        observed_cached_tokens = -1
+        while len(outputs) < 3:
+            await asyncio.sleep(0.01)
+            observed_cached_tokens = max(
+                observed_cached_tokens,
+                max((out.num_cached_tokens for out in outputs), default=-1),
+            )
+
+        assert observed_cached_tokens > 0
+
+        await engine.pause_generation(mode="abort")
+
+        final_output = await gen_task
+
+        assert final_output is not None
+        assert final_output.finished
+        assert final_output.outputs[0].finish_reason == "abort"
+        assert final_output.num_cached_tokens == observed_cached_tokens
+
+        assert stats_calls == [
+            {
+                "finish_reason": FinishReason.ABORT,
+                "num_cached_tokens": observed_cached_tokens,
+            }
+        ]
+        assert trace_calls == [
+            {
+                "trace_headers": trace_headers,
+                "num_cached_tokens": observed_cached_tokens,
+            }
+        ]
 
 
 @pytest.mark.asyncio

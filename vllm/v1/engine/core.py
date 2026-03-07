@@ -15,6 +15,7 @@ from logging import DEBUG
 from typing import Any, TypeVar, cast
 
 import msgspec
+import torch
 import zmq
 
 import vllm.envs as envs
@@ -76,6 +77,7 @@ from vllm.version import __version__ as VLLM_VERSION
 logger = init_logger(__name__)
 
 HANDSHAKE_TIMEOUT_MINS = 5
+EMPTY_CPU_TENSOR = torch.empty(0, device="cpu")
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
@@ -1482,18 +1484,33 @@ class EngineCoreProc(EngineCore):
         self._idle_state_callbacks.append(partial(engine_idle_callback, future=future))
         return future
 
-    def _send_abort_outputs(self, aborted_reqs: list[tuple[str, int]]) -> None:
+    @staticmethod
+    def _make_abort_output(request: Request) -> EngineCoreOutput:
+        return EngineCoreOutput(
+            request_id=request.request_id,
+            new_token_ids=[],
+            pooling_output=(
+                EMPTY_CPU_TENSOR if request.pooling_params is not None else None
+            ),
+            finish_reason=request.get_finished_reason(),
+            stop_reason=request.stop_reason,
+            events=request.take_events(),
+            trace_headers=request.trace_headers,
+            num_cached_tokens=request.num_cached_tokens,
+            num_external_computed_tokens=request.num_external_computed_tokens,
+            num_nans_in_logits=request.num_nans_in_logits,
+        )
+
+    def _send_abort_outputs(self, aborted_reqs: list[Request]) -> None:
         # TODO(nick) this will be moved inside the scheduler
         if aborted_reqs:
-            # Map client_index to list of request_ids that belong to that client.
-            by_client = defaultdict[int, set[str]](set)
-            for req_id, client_index in aborted_reqs:
-                by_client[client_index].add(req_id)
-            for client_index, req_ids in by_client.items():
-                outputs = [
-                    EngineCoreOutput(req_id, [], finish_reason=FinishReason.ABORT)
-                    for req_id in req_ids
-                ]
+            # Map client_index to finished Request objects for that client.
+            by_client = defaultdict[int, list[Request]](list)
+            for request in aborted_reqs:
+                by_client[request.client_index].append(request)
+            for client_index, requests in by_client.items():
+                outputs = [self._make_abort_output(request) for request in requests]
+                req_ids = {request.request_id for request in requests}
                 eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
                 self.output_queue.put_nowait((client_index, eco))
 

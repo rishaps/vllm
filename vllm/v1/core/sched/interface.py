@@ -137,7 +137,7 @@ class SchedulerInterface(ABC):
         self,
         request_ids: str | Iterable[str] | None,
         finished_status: "RequestStatus",
-    ) -> list[tuple[str, int]]:
+    ) -> list["Request"]:
         """Finish the requests in the scheduler's internal queue. If the request
         is not in the queue, this method will do nothing for that request.
 
@@ -151,8 +151,10 @@ class SchedulerInterface(ABC):
             finished_status: The finished status of the given requests.
 
         Returns:
-            Tuple of (req_id, client_index) for requests that were aborted. Will not
-            include any that were already finished.
+            The Request objects that were actually finished. These are returned
+            after their status has been updated and scheduler-owned resources
+            have been released, so callers can still read request metadata when
+            constructing final outputs.
         """
         raise NotImplementedError
 
