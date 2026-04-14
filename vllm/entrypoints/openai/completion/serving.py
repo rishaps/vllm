@@ -339,7 +339,8 @@ class OpenAIServingCompletion(OpenAIServing):
                             delta_token_ids = prompt_token_ids
                             out_logprobs = prompt_logprobs
                         else:
-                            # The engine may emit a helper token internally,
+                            # The current echo_without_generation workaround
+                            # may cause the engine to emit one internal token,
                             # but it must not become visible to clients.
                             delta_text = ""
                             delta_token_ids = []
@@ -516,6 +517,8 @@ class OpenAIServingCompletion(OpenAIServing):
 
             for output in final_res.outputs:
                 self._raise_if_error(output.finish_reason, request_id)
+                prompt_max_tokens = max_tokens_per_prompt[prompt_idx]
+                echo_without_generation = request.echo and prompt_max_tokens == 0
                 visible_token_ids = as_list(output.token_ids)
                 num_visible_tokens = len(visible_token_ids)
 
@@ -523,7 +526,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     if request.return_token_ids:
                         prompt_text = ""
                     assert prompt_text is not None
-                    if max_tokens_per_prompt[prompt_idx] == 0:
+                    if echo_without_generation:
                         token_ids = prompt_token_ids
                         out_logprobs = prompt_logprobs
                         output_text = prompt_text

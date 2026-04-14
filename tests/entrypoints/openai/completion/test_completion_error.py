@@ -187,15 +187,19 @@ async def _collect_stream_payloads(
     results: list[tuple[int, RequestOutput]],
     *,
     max_tokens_per_prompt: list[int],
+    engine_inputs: list[dict[str, str | list[int]]] | None = None,
 ):
+    if engine_inputs is None:
+        engine_inputs = [_build_engine_input()]
+
     response = serving_completion.completion_stream_generator(
         request=request,
-        engine_inputs=[_build_engine_input()],
+        engine_inputs=engine_inputs,
         result_generator=_stream_results(results),
         request_id="test-id",
         created_time=0,
         model_name=MODEL_NAME,
-        num_prompts=1,
+        num_prompts=len(engine_inputs),
         max_tokens_per_prompt=max_tokens_per_prompt,
         tokenizer=serving_completion.renderer.tokenizer,
         request_metadata=RequestResponseMetadata(request_id="test-id"),
@@ -528,6 +532,65 @@ async def test_completion_stream_generator_uses_normalized_max_tokens():
 
 
 @pytest.mark.asyncio
+async def test_completion_stream_generator_uses_per_prompt_max_tokens():
+    mock_engine = _build_mock_engine()
+    serving_completion = _build_serving_completion(mock_engine)
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt=["First prompt", "Second prompt"],
+        max_tokens=None,
+        stream=True,
+        echo=True,
+        return_token_ids=True,
+    )
+
+    _, payloads, choice_payloads, _ = await _collect_stream_payloads(
+        serving_completion,
+        request,
+        [
+            (
+                1,
+                _build_request_output(
+                    prompt="Second prompt",
+                    prompt_token_ids=[3, 4],
+                    text="Beta",
+                    token_ids=[202],
+                    finish_reason="length",
+                ),
+            ),
+            (
+                0,
+                _build_request_output(
+                    prompt="First prompt",
+                    prompt_token_ids=[1, 2],
+                    text="Alpha",
+                    token_ids=[101],
+                    finish_reason="length",
+                ),
+            ),
+        ],
+        max_tokens_per_prompt=[0, 16],
+        engine_inputs=[
+            _build_engine_input(prompt="First prompt", prompt_token_ids=[1, 2]),
+            _build_engine_input(prompt="Second prompt", prompt_token_ids=[3, 4]),
+        ],
+    )
+
+    assert all("error" not in payload for payload in payloads)
+    assert [payload["choices"][0]["index"] for payload in choice_payloads] == [1, 0]
+
+    second_prompt_choice = choice_payloads[0]["choices"][0]
+    assert second_prompt_choice["text"] == "Beta"
+    assert second_prompt_choice["prompt_token_ids"] == [3, 4]
+    assert second_prompt_choice["token_ids"] == [202]
+
+    first_prompt_choice = choice_payloads[1]["choices"][0]
+    assert first_prompt_choice["text"] == ""
+    assert first_prompt_choice["prompt_token_ids"] == [1, 2]
+    assert first_prompt_choice["token_ids"] == []
+
+
+@pytest.mark.asyncio
 async def test_stream_generator_hides_prompt_token_ids_without_return_token_ids():
     mock_engine = _build_mock_engine()
     serving_completion = _build_serving_completion(mock_engine)
@@ -673,7 +736,7 @@ async def test_zero_budget_stream_hides_prompt_token_ids():
         ],
     ],
 )
-async def test_stream_generator_suppresses_helper_token(
+async def test_stream_generator_suppresses_internal_token(
     results: list[tuple[int, RequestOutput]],
 ):
     mock_engine = _build_mock_engine()

@@ -689,7 +689,7 @@ async def test_completion_stream_without_max_tokens_uses_normalized_budget(
     "model_name",
     [MODEL_NAME],
 )
-async def test_zero_budget_echo_completion_hides_helper_token(
+async def test_zero_budget_echo_completion_suppresses_internal_token(
     client: openai.AsyncOpenAI, model_name: str
 ):
     prompt = "Hello, my name is"
@@ -725,7 +725,7 @@ async def test_zero_budget_echo_completion_hides_helper_token(
     "model_name",
     [MODEL_NAME],
 )
-async def test_zero_budget_echo_stream_hides_helper_token(
+async def test_zero_budget_echo_stream_suppresses_internal_token(
     client: openai.AsyncOpenAI, model_name: str
 ):
     prompt = "Hello, my name is"
